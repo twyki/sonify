@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sonify"
+version = "0.1.0"
+description = "Audio transcription and diarization via Whisper & pyannote"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [ { name = "Tom Wysotzki", email = "info@datawys.de" } ]
+license = { text = "MIT" }
+dependencies = [
+  "openai-whisper==20250625",
+  "pyannote.audio==3.3.2",
+  "streamlit==1.46.1",
+]
+
+
+
+[project.scripts]
+sonify = "sonify.cli:main"
+sonify-app = "sonify.streamlit_entry:main"
