@@ -1,164 +1,21 @@
+import streamlit as st
 import json
-import tempfile
-import hashlib
-from pathlib import Path
+from sonify.transcribe import transcribe_stream, cached_wav
+from sonify.diarize import diarize_audio
 from datetime import timedelta
 import time
+import tempfile
+from pathlib import Path
 from typing import List, Dict
+from sonify.utils.session import reset_state, init_session
+from sonify.utils.cache import generate_file_id, save_cached_turns, load_cached_turns, load_cached_segments, save_cached_segments
 
-import streamlit as st
-from cryptography.fernet import Fernet
-
-from sonify.transcribe import cached_wav, transcribe_stream
-from sonify.diarize import diarize_audio
-
-CONFIG_PATH = Path.home() / ".sonify_config.json"
-KEY_PATH = Path.home() / ".sonify_key"
 AUDIO_TYPES = ["mp3", "wav", "m4a", "flac", "aac", "opus", "ogg"]
-
-# Cache for transcript segments
-CACHE_DIR_SEG = Path.home() / ".cache" / "sonify" / "segments"
-CACHE_DIR_SEG.mkdir(parents=True, exist_ok=True)
-
-CACHE_DIR_DIAR = Path.home() / ".cache" / "sonify" / "diar"
-CACHE_DIR_DIAR.mkdir(parents=True, exist_ok=True)
-
 
 def format_hms(seconds: float) -> str:
     hrs, rem = divmod(int(seconds), 3600)
     mins, secs = divmod(rem, 60)
     return f"{hrs:02d}:{mins:02d}:{secs:02d}"
-
-
-def load_or_generate_key() -> Fernet:
-    if not KEY_PATH.exists():
-        key = Fernet.generate_key()
-        KEY_PATH.write_bytes(key)
-    else:
-        key = KEY_PATH.read_bytes()
-    return Fernet(key)
-
-
-def init_session():
-    """Initialize session state and decrypt stored HF token if present."""
-    # 1. Load or generate your Fernet key
-    from cryptography.fernet import Fernet
-    if not KEY_PATH.exists():
-        key = Fernet.generate_key()
-        KEY_PATH.write_bytes(key)
-    else:
-        key = KEY_PATH.read_bytes()
-    fernet = Fernet(key)
-    st.session_state.setdefault("_fernet", fernet)
-
-    # 2. Load saved config
-    saved = {}
-    if CONFIG_PATH.exists():
-        try:
-            saved = json.loads(CONFIG_PATH.read_text())
-        except json.JSONDecodeError:
-            saved = {}
-
-    # 3. Decrypt hf_token (empty string on failure)
-    enc_token = saved.get("hf_token", "")
-    try:
-        hf_token = fernet.decrypt(enc_token.encode()).decode()
-    except Exception:
-        hf_token = ""
-
-    # 4. Populate defaults
-    st.session_state.setdefault("cfg", {
-        "model": saved.get("model", "small"),
-        "language": saved.get("language", "en"),
-        "hf_token": hf_token,
-    })
-    st.session_state.setdefault("phase", "empty")
-    st.session_state.setdefault("audio_path", None)
-    st.session_state.setdefault("file_id", None)
-    st.session_state.setdefault("segments", [])
-    st.session_state.setdefault("turns", [])
-    st.session_state.setdefault("prev_model", None)
-    st.session_state.setdefault("confirm_clear", False)
-    st.session_state.setdefault("file_uploader_key", 0)
-    st.session_state.setdefault("speaker_names", {})
-
-
-def persist_config() -> None:
-    """Encrypt and save current config (model, language, hf_token)."""
-    cfg = st.session_state.cfg
-    fernet = st.session_state._fernet
-
-    # 1. Encrypt HF token
-    try:
-        enc_token = fernet.encrypt(cfg["hf_token"].encode()).decode()
-    except Exception:
-        st.warning("Failed to encrypt HF token.")
-        enc_token = ""
-
-    # 2. Write out the rest of the config
-    to_save = {
-        "model": cfg["model"],
-        "language": cfg["language"],
-        "hf_token": enc_token,
-    }
-    try:
-        CONFIG_PATH.write_text(json.dumps(to_save))
-    except Exception:
-        st.warning("Failed to save config.")
-
-
-def reset_state():
-    for k in ["phase", "audio_path", "file_id", "segments", "turns"]:
-        st.session_state[k] = None if k != "phase" else "empty"
-
-
-def generate_file_id(data: bytes, name: str) -> str:
-    digest = hashlib.sha256(data[:64]).hexdigest()[:8]
-    return f"{name}-{len(data)}-{digest}"
-
-
-# --- Updated cache key functions using file_id instead of path ---
-
-def _cache_key(file_id: str, model: str, language: str) -> str:
-    raw = f"{file_id}-{model}-{language}"
-    return hashlib.md5(raw.encode()).hexdigest()
-
-
-def load_cached_segments(file_id: str, model: str, language: str) -> List[Dict]:
-    key = _cache_key(file_id, model, language)
-    fpth = CACHE_DIR_SEG / f"{key}.json"
-    if fpth.exists():
-        try:
-            return json.loads(fpth.read_text())
-        except:
-            fpth.unlink()
-    return []
-
-
-def save_cached_segments(file_id: str, model: str, language: str, segs: List[Dict]):
-    key = _cache_key(file_id, model, language)
-    fpth = CACHE_DIR_SEG / f"{key}.json"
-    fpth.write_text(json.dumps(segs))
-
-
-def load_cached_turns(file_id: str, model: str, language: str) -> List[Dict]:
-    key = _cache_key(file_id, model, language)
-    fpth = CACHE_DIR_DIAR / f"{key}.json"
-    if fpth.exists():
-        try:
-            return json.loads(fpth.read_text())
-        except:
-            fpth.unlink()
-    return []
-
-
-def save_cached_turns(file_id: str, model: str, language: str, turns: List[Dict]):
-    key = _cache_key(file_id, model, language)
-    fpth = CACHE_DIR_DIAR / f"{key}.json"
-    fpth.write_text(json.dumps(turns))
-
-
-# --------------------------------------------------------------
 
 
 def show_transcript(segments: List[Dict]):
@@ -174,12 +31,10 @@ def show_transcript(segments: List[Dict]):
         txt.append(f"[{start}–{end}] {text}\n\n")
     md_blob = "".join(md)
     txt_blob = "".join(txt)
-
     with st.expander("Transcript Segments", icon=":material/article:"):
         _, _, c2 = st.columns([1, 6, 1])
         c2.download_button(
-            ".txt",
-            txt_blob,
+            ".txt", txt_blob,
             file_name="transcript.txt",
             icon=":material/download:",
             key=f"dl_txt_{st.session_state.file_id}"
@@ -187,53 +42,9 @@ def show_transcript(segments: List[Dict]):
         st.markdown(md_blob)
 
 
-def clear_cache():
-    ap = st.session_state.get("audio_path")
-    if ap:
-        Path(ap).unlink(missing_ok=True)
-    base = Path.home() / ".cache" / "sonify"
-    if base.exists():
-        for f in base.rglob("*"):
-            f.unlink(missing_ok=True)
-    reset_state()
-
-
-def sidebar_settings():
-    st.sidebar.header("Settings")
-    cfg = st.session_state.cfg
-
-    models = ["tiny", "base", "small", "medium", "large"]
-    sel = st.sidebar.selectbox("Whisper model", models, index=models.index(cfg["model"]))
-    if st.session_state.prev_model and sel != st.session_state.prev_model:
-        reset_state()
-    cfg["model"] = sel
-    st.session_state.prev_model = sel
-
-    cfg["language"] = st.sidebar.text_input("Language code", value=cfg["language"])
-    cfg["hf_token"] = st.sidebar.text_input("HuggingFace token", value=cfg["hf_token"], type="password")
-    persist_config()
-
-    st.sidebar.markdown("---")
-    if not st.session_state.confirm_clear:
-        if st.sidebar.button("Clear All Cached Files and Restart"):
-            st.session_state.confirm_clear = True
-            st.rerun()
-    else:
-        st.sidebar.warning("This cannot be undone. Clear all cache?")
-        y, n = st.sidebar.columns(2)
-        if y.button("Yes, clear"):
-            clear_cache()
-            st.sidebar.success("Cache cleared.")
-            st.session_state.file_uploader_key += 1
-            st.session_state.confirm_clear = False
-            st.rerun()
-        if n.button("Cancel"):
-            st.session_state.confirm_clear = False
-
-
 def handle_upload():
     up = st.file_uploader("Upload audio file", type=AUDIO_TYPES,
-                          key=st.session_state.file_uploader_key, accept_multiple_files=False)
+                          key=st.session_state.file_uploader_key)
     if up and st.session_state.phase == "empty":
         data = up.read()
         sid = generate_file_id(data, up.name)
@@ -242,12 +53,6 @@ def handle_upload():
         st.session_state.audio_path = tmp.name
         st.session_state.file_id = sid
         st.session_state.phase = "uploaded"
-        st.rerun()
-    if not up and st.session_state.phase not in ["empty", "transcribing"]:
-        ap = st.session_state.audio_path
-        if ap:
-            Path(ap).unlink(missing_ok=True)
-        reset_state()
         st.rerun()
 
 
@@ -326,6 +131,10 @@ def handle_transcription():
 
 def build_navigation():
     c1, _, c2 = st.columns([1, 6, 1])
+    if c2.button("Restart", icon=":material/sync:"):
+        reset_state()
+        st.session_state.file_uploader_key += 1
+        st.rerun()
     if st.session_state.phase == 'uploaded':
         if c1.button("Start Transcription", icon=":material/play_arrow:"):
             st.session_state.phase = "transcribing"
@@ -348,10 +157,6 @@ def build_navigation():
             else:
                 st.session_state.phase = "diarizing"
                 st.rerun()
-        if c2.button("Restart", icon=":material/sync:"):
-            reset_state()
-            st.session_state.file_uploader_key += 1
-            st.rerun()
 
 
 def handle_diarization():
@@ -403,7 +208,7 @@ def handle_diarization():
         buffer_msg = None
         stt = None
         all_speakers = set([t["speaker"] for t in turns])
-        with st.expander("Assign Real Names to Speakers", icon=":material/account_circle:"):
+        with st.expander("Assign Names to Speakers", icon=":material/account_circle:"):
             if st.session_state.speaker_names == {}:
                 st.session_state.speaker_names = {lbl: lbl for lbl in all_speakers}
             for lbl in all_speakers:
@@ -446,22 +251,11 @@ def handle_diarization():
             )
             st.markdown(speaker_txt)
 
-
-def main():
-    st.set_page_config(page_title="Sonify – Transcription", layout="wide")
-    init_session()
-    sidebar_settings()
-
-    handle_upload()
-    if st.session_state.audio_path:
-        st.audio(
-            open(st.session_state.audio_path, "rb"),
-            format=f"audio/{Path(st.session_state.audio_path).suffix[1:]}"
-        )
-
+init_session()
+st.header("Transcribe & Diarize")
+handle_upload()
+if st.session_state.audio_path:
+    st.audio(open(st.session_state.audio_path, "rb"),
+             format=f"audio/{Path(st.session_state.audio_path).suffix[1:]}")
     handle_transcription()
     handle_diarization()
-
-
-if __name__ == "__main__":
-    main()
