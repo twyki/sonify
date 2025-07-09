@@ -7,12 +7,16 @@ name = "sonify"
 version = "0.1.0"
 description = "Audio transcription and diarization via Whisper & pyannote"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 authors = [ { name = "Tom Wysotzki", email = "info@datawys.de" } ]
 license = { text = "MIT" }
 dependencies = [
   "openai-whisper==20250625",
-  "pyannote.audio==3.3.2",
+  "torch==2.2.0",
+  "pyannote.audio==3.3.1",
+  "lightning-fabric",
+  "cryptography",
+  "pytorch-lightning>=2.0.2,<3.0.0",
   "streamlit==1.46.1",
 ]
 
@@ -21,3 +25,6 @@ dependencies = [
 [project.scripts]
 sonify = "sonify.cli:main"
 sonify-app = "sonify.streamlit_entry:main"
+
+[tool.setuptools.packages.find]
+exclude = ["output"]
