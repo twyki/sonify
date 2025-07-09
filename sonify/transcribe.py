@@ -76,7 +76,7 @@ def _transcribe_simple(wav_path: str, model_name: str, language: str) -> Dict[st
 def transcribe_with_cache(
         src: str,
         model_name: str = "medium",
-        language: str = "en",
+        language: str = "de",
         force: bool = False,
         chunk_size: int | None = None,
         progress_callback: Callable[[float], None] = None,
