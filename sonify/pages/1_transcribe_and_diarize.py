@@ -10,8 +10,8 @@ from typing import List, Dict
 from sonify.utils.session import reset_state, init_session
 from sonify.utils.cache import generate_file_id, save_cached_turns, load_cached_turns, load_cached_segments, save_cached_segments
 
-
 AUDIO_TYPES = ["mp3", "wav", "m4a", "flac", "aac", "opus", "ogg"]
+
 
 def format_hms(seconds: float) -> str:
     hrs, rem = divmod(int(seconds), 3600)
@@ -252,7 +252,7 @@ def handle_diarization():
             )
             st.markdown(speaker_txt)
 
-init_session()
+
 st.header("Transcribe & Diarize")
 handle_upload()
 if st.session_state.audio_path:
