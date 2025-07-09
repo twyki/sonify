@@ -18,7 +18,8 @@ dependencies = [
   "cryptography",
   "pytorch-lightning>=2.0.2,<3.0.0",
   "streamlit==1.46.1",
-  "numpy <2.0"
+  "numpy <2.0",
+  "imageio-ffmpeg==0.6.0"
 ]
 
 
