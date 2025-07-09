@@ -66,7 +66,7 @@ def _transcribe_simple(wav_path: str, model_name: str, language: str) -> Dict[st
     import whisper
     model = whisper.load_model(model_name)
     logger.info(f"Transcribing {wav_path} with {model_name} ({language}) …")
-    return model.transcribe(wav_path, language=language, verbose=False)
+    return model.transcribe(wav_path, language=language, verbose=False ,fp16=False)
 
 
 # -----------------------------------------------------------------------------

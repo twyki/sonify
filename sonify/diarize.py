@@ -7,8 +7,8 @@ from pyannote.audio.models.blocks.pooling import StatsPool
 from pyannote.audio.pipelines.utils.hook import ProgressHook
 from pyannote.audio import Pipeline
 from .transcribe import cached_wav  # ← import at the top of the file
+from sonify.utils.cache import generate_file_id
 from pathlib import Path
-import math
 
 
 # … your existing imports …
@@ -97,7 +97,6 @@ def diarize_audio(
 
     wav_path = cached_wav(src)
     # 1) Prepare WAV & file_id
-    from sonify.streamlit_app import generate_file_id
     audio_bytes = Path(wav_path).read_bytes()
     file_id = generate_file_id(audio_bytes, Path(wav_path).name)
 
