@@ -158,9 +158,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.write(f'{cfg.get("model")}->{current_model}')
-st.write(f'{cfg.get("language")}->{current_lang}')
-st.write(f'{cfg.get("hf_token")}->{current_token}')
 if cfg.get("model") != current_model or cfg.get("language") != current_lang or cfg.get("hf_token") != current_token:
     if st.session_state.phase != "start":
         st.warning("Changes during transcription/diarization will result in a loss of progress.")
