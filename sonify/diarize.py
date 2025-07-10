@@ -71,7 +71,7 @@ def run_diarization(
     Perform speaker diarization on WAV file and align with word segments.
     Cached by Streamlit to avoid re-computation.
     """
-    print(f"{src_wav=}, {segments=}, {model_id=}, {hf_token=}")
+    #print(f"{src_wav=}, {segments=}, {model_id=}, {hf_token=}")
     pipeline = get_diar_pipeline(model_id, hf_token)
     diar = pipeline(src_wav)
 

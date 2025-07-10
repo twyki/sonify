@@ -104,7 +104,7 @@ def handle_upload():
         suffix = Path(up.name).suffix
 
         # Use a fixed cache directory under the system temp folder
-        cache_dir = Path(tempfile.gettempdir()) / f"sonify_uploads_{st.session_state.user_id}"
+        cache_dir = Path(tempfile.gettempdir()) / f"sonify_uploads_{st.session_state.session_id}"
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         tmp_path = cache_dir / f"{hash_hex}{suffix}"
@@ -139,6 +139,7 @@ def handle_transcription():
             prog = completed / total if total else 0
             bar.progress(prog)
             txt.text(f"{completed}/{total} chunks | {prog:.0%}")
+
         result = transcribe_with_cache(
             st.session_state.audio_path,
             model_name=cfg["model"],
@@ -168,7 +169,6 @@ def handle_transcription():
     elif phase == "transcribed":
         build_navigation()
         show_transcript(st.session_state.segments)
-
 
 
 def build_navigation():
@@ -285,10 +285,20 @@ def handle_diarization():
             st.markdown(speaker_txt)
 
 
-header_with_badges("Transcribe & Diarize")
-handle_upload()
-if st.session_state.audio_path:
-    st.audio(open(st.session_state.audio_path, "rb"),
-             format=f"audio/{Path(st.session_state.audio_path).suffix[1:]}")
-    handle_transcription()
-    handle_diarization()
+try:
+    header_with_badges("Transcribe & Diarize")
+    handle_upload()
+    if st.session_state.audio_path:
+        st.audio(open(st.session_state.audio_path, "rb"),
+                 format=f"audio/{Path(st.session_state.audio_path).suffix[1:]}")
+        handle_transcription()
+        handle_diarization()
+except Exception as e:
+    st.error(f"An unexpected error occurred while processing your files: {e}\n"
+             f"if this occurs multiple times, please contact us")
+    if st.button("Restart Workflow", key='error_restart'):
+        # Clear all non-ID state and rerun
+        for key in list(st.session_state.keys()):
+            if key not in ('session_id', 'user_id', 'cfg'):
+                del st.session_state[key]
+    st.rerun()

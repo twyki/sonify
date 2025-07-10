@@ -33,7 +33,7 @@ def main():
 
     # Reset on page refresh if processing with no files
     if (st.session_state.get('batch_phase') == 'processing' and
-        not st.session_state.get('batch_files')):
+            not st.session_state.get('batch_files')):
         st.session_state.batch_phase = 'start'
         st.session_state.batch_key = st.session_state.get('batch_key', 0) + 1
 
@@ -78,7 +78,7 @@ def main():
                 if not path.exists():
                     path.write_bytes(data)
 
-                st.audio(data, format=f"audio/{suffix[1:]}" )
+                st.audio(data, format=f"audio/{suffix[1:]}")
 
                 # Transcribe & Diarize
                 res = transcribe_with_cache(
@@ -93,9 +93,9 @@ def main():
 
                 # Expander for speaker diarization
                 with st.expander(
-                    f"Speaker Diarization: {up.name}",
-                    icon=":material/record_voice_over:",
-                    expanded=False
+                        f"Speaker Diarization: {up.name}",
+                        icon=":material/record_voice_over:",
+                        expanded=False
                 ):
                     # Build adjusted transcript using merged segments logic
                     prev_start_time = None
@@ -139,4 +139,15 @@ def main():
                     )
                     st.markdown(speaker_txt)
 
-main()
+
+try:
+    main()
+except Exception as e:
+    st.error(f"An unexpected error occurred while processing your files: {e}\n"
+             f"if this occurs multiple times, please contact us")
+    if st.button("Restart Workflow", key='error_restart'):
+        # Clear all non-ID state and rerun
+        for key in list(st.session_state.keys()):
+            if key not in ('session_id', 'user_id', 'cfg'):
+                del st.session_state[key]
+    st.rerun()
