@@ -7,12 +7,13 @@ from pathlib import Path
 from typing import List, Dict
 from sonify.utils.session import reset_state, init_session
 
+
 try:
     cfg = st.session_state.cfg
 except AttributeError:
     init_session()  # your function that does st.session_state.cfg = {...}
     cfg = st.session_state.cfg
-
+st.set_page_config(page_title="Sonify - Single Demo", page_icon=":material/speaker:", layout="wide")
 AUDIO_TYPES = ["mp3", "wav", "m4a", "flac", "aac", "opus", "ogg"]
 
 BADGE_CSS = """

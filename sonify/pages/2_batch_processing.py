@@ -12,6 +12,7 @@ from sonify.diarize import diarize_audio
 AUDIO_TYPES = ["mp3", "wav", "m4a", "flac", "aac", "opus", "ogg"]
 MAX_BATCH_FILES = 20  # reasonable limit
 
+st.set_page_config(page_title="Sonify - Batch Demo", page_icon=":material/speaker:", layout="wide")
 
 def format_hms(seconds: float) -> str:
     hrs, rem = divmod(int(seconds), 3600)
