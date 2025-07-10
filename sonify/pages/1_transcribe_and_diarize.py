@@ -10,7 +10,54 @@ from typing import List, Dict
 from sonify.utils.session import reset_state, init_session
 from sonify.utils.cache import generate_file_id, save_cached_turns, load_cached_turns, load_cached_segments, save_cached_segments
 
+try:
+    cfg = st.session_state.cfg
+except AttributeError:
+    init_session()  # your function that does st.session_state.cfg = {...}
+    cfg = st.session_state.cfg
+
 AUDIO_TYPES = ["mp3", "wav", "m4a", "flac", "aac", "opus", "ogg"]
+
+BADGE_CSS = """
+<style>
+.badge {
+  display: inline-block;
+  padding: 0.15em 0.4em;
+  font-size: 70%;
+  font-weight: 600;
+  line-height: 1;
+  color: #fff;
+  border-radius: 0.2rem;
+  margin-left: 0.3rem;
+}
+/* Color ramp from tiny (light) to large (dark) */
+.badge-tiny   { background-color: #cce5ff; color: #004085; }
+.badge-base   { background-color: #99ccff; }
+.badge-small  { background-color: #66b2ff; }
+.badge-medium { background-color: #3385ff; }
+.badge-large  { background-color: #005ce6; }
+.badge-lang   { background-color: #dec484; }
+.badge-phase   { background-color: #6f9f9c; }
+}
+</style>
+"""
+st.markdown(BADGE_CSS, unsafe_allow_html=True)
+
+
+def header_with_badges(title: str):
+    model = cfg.get("model", "unknown")
+    lang = cfg.get("language", "unknown")
+    # If your language is stored as ISO code, and you want human name:
+    reverse_map = {v: k.title() for k, v in st.session_state.get("LANGUAGES", {}).items()}
+    lang_name = reverse_map.get(lang, lang)
+
+    st.markdown(
+        f"## {title}\n"
+        f"<span class='badge badge-{model}'>model: {model}</span>"
+        f"<span class='badge badge-lang'>lang: {lang_name}</span>"
+        f"<span class='badge badge-phase'>phase: {st.session_state.phase}</span>",
+        unsafe_allow_html=True
+    )
 
 
 def format_hms(seconds: float) -> str:
@@ -46,7 +93,7 @@ def show_transcript(segments: List[Dict]):
 def handle_upload():
     up = st.file_uploader("Upload audio file", type=AUDIO_TYPES,
                           key=st.session_state.file_uploader_key)
-    if up and st.session_state.phase == "empty":
+    if up and st.session_state.phase == "start":
         data = up.read()
         sid = generate_file_id(data, up.name)
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=Path(up.name).suffix)
@@ -59,7 +106,6 @@ def handle_upload():
 
 def handle_transcription():
     phase = st.session_state.phase
-    cfg = st.session_state.cfg
 
     if phase == "uploaded":
         # use file_id for cache lookup
@@ -137,22 +183,20 @@ def build_navigation():
         st.session_state.file_uploader_key += 1
         st.rerun()
     if st.session_state.phase == 'uploaded':
-        if c1.button("Start Transcription", icon=":material/play_arrow:"):
+        if c1.button("Start Transcription", icon=":material/play_arrow:", type="primary"):
             st.session_state.phase = "transcribing"
             st.rerun()
     if st.session_state.phase in ["transcribing", "diarizing"]:
-        if c1.button("Cancel", icon=":material/cancel:"):
+        if c1.button("Cancel", icon=":material/cancel:", type="secondary"):
             st.session_state.phase = "uploaded"
             st.rerun()
     if st.session_state.phase == "transcribed":
-        hf_token = st.session_state.cfg.get("hf_token", "").strip()
+        hf_token = cfg.get("hf_token", "").strip()
         disabled_sep = hf_token == ""
-        if c1.button(
-                "Separate Speakers",
-                disabled=(st.session_state.phase != "transcribed" or disabled_sep),
-                help="You need to enter a HuggingFace token in Settings before running diarization.",
-                icon=":material/record_voice_over:"
-        ):
+        if c1.button("Separate Speakers",
+                     disabled=(st.session_state.phase != "transcribed" or disabled_sep),
+                     help="You need to enter a HuggingFace token in Settings before running diarization.",
+                     icon=":material/record_voice_over:", type="primary"):
             if disabled_sep:
                 st.warning("You need to enter a HuggingFace token in Settings before running diarization.")
             else:
@@ -162,18 +206,12 @@ def build_navigation():
 
 def handle_diarization():
     phase = st.session_state.phase
-    cfg = st.session_state.cfg
-    fid = st.session_state.file_id
-    mdl = cfg["model"]
-    lang = cfg["language"]
 
     if phase == "diarizing":
         build_navigation()
         # placeholders for live updates
         bar = st.progress(0.0)
         txt = st.empty()
-
-        cfg = st.session_state.cfg
         fid = st.session_state.file_id
         mdl = cfg["model"]
         lang = cfg["language"]
@@ -253,7 +291,7 @@ def handle_diarization():
             st.markdown(speaker_txt)
 
 
-st.header("Transcribe & Diarize")
+header_with_badges("Transcribe & Diarize")
 handle_upload()
 if st.session_state.audio_path:
     st.audio(open(st.session_state.audio_path, "rb"),

@@ -1,7 +1,11 @@
 import streamlit as st
 from sonify.utils.session import init_session
 
-init_session()
+try:
+    cfg = st.session_state.cfg
+except AttributeError:
+    init_session()            # your function that does st.session_state.cfg = {...}
+    cfg = st.session_state.cfg
 st.title("How to Obtain and Configure Your Hugging Face Token")
 st.markdown(
     """
@@ -34,10 +38,20 @@ st.markdown(
     "2. navigate to  [https://huggingface.co/pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1) and accept the user conditions."
 )
 st.header("Step 4: Configure Sonify to Use Your Token")
-token_input = st.text_input("Hugging Face Token", type="password", value=st.session_state.cfg["hf_token"])
+token_input = st.text_input("Hugging Face Token", type="password", value=cfg["hf_token"])
+st.markdown(
+    """
+<style>
+    [title="Show password text"] {
+        display: none;
+    }
+</style>
+""",
+    unsafe_allow_html=True,
+)
 if st.button("Save Token"):
     if token_input:
-        st.session_state.cfg["hf_token"] = token_input
+        cfg["hf_token"] = token_input
         st.success("Token saved to session state.")
     else:
         st.error("Please enter a valid token.")

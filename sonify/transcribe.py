@@ -66,7 +66,10 @@ def _transcribe_simple(wav_path: str, model_name: str, language: str) -> Dict[st
     import whisper
     model = whisper.load_model(model_name)
     logger.info(f"Transcribing {wav_path} with {model_name} ({language}) …")
-    return model.transcribe(wav_path, language=language, verbose=False ,fp16=False)
+    if language == "auto":
+        return model.transcribe(wav_path,verbose=False, fp16=False)
+    else:
+        return model.transcribe(wav_path, language=language, verbose=False ,fp16=False)
 
 
 # -----------------------------------------------------------------------------
@@ -150,8 +153,8 @@ def transcribe_with_cache(
 
 def transcribe_stream(
         wav_path: str,
-        model_name: str = "small",
-        language: str = "en",
+        model_name: str,
+        language: str,
         chunk_size: int = 30,
 ) -> Generator[Dict[str, Any], None, None]:
     import subprocess, math, shutil, json, hashlib
