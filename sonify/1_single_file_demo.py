@@ -1,14 +1,11 @@
 import streamlit as st
 import json
-from sonify.transcribe import transcribe_stream, cached_wav
+from sonify.transcribe import transcribe_with_cache
 from sonify.diarize import diarize_audio
 from datetime import timedelta
-import time
-import tempfile
 from pathlib import Path
 from typing import List, Dict
 from sonify.utils.session import reset_state, init_session
-from sonify.utils.cache import generate_file_id, save_cached_turns, load_cached_turns, load_cached_segments, save_cached_segments
 
 try:
     cfg = st.session_state.cfg
@@ -79,27 +76,43 @@ def show_transcript(segments: List[Dict]):
         txt.append(f"[{start}–{end}] {text}\n\n")
     md_blob = "".join(md)
     txt_blob = "".join(txt)
-    with st.expander("Transcript Segments", icon=":material/article:"):
+    chl_exp = st.session_state.phase == 'transcribed'
+    with st.expander("Transcript Segments", icon=":material/article:", expanded=chl_exp):
         _, _, c2 = st.columns([1, 6, 1])
         c2.download_button(
             ".txt", txt_blob,
             file_name="transcript.txt",
             icon=":material/download:",
-            key=f"dl_txt_{st.session_state.file_id}"
+            key=f"dl_txt_{st.session_state.file_id}",
+            type="primary"
         )
         st.markdown(md_blob)
 
 
 def handle_upload():
-    up = st.file_uploader("Upload audio file", type=AUDIO_TYPES,
-                          key=st.session_state.file_uploader_key)
+    up = st.file_uploader(
+        "Upload audio file",
+        type=AUDIO_TYPES,
+        key=st.session_state.file_uploader_key
+    )
     if up and st.session_state.phase == "start":
         data = up.read()
-        sid = generate_file_id(data, up.name)
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=Path(up.name).suffix)
-        tmp.write(data)
-        st.session_state.audio_path = tmp.name
-        st.session_state.file_id = sid
+
+        # Compute a stable filename from the file contents
+        import hashlib, tempfile
+        hash_hex = hashlib.sha256(data).hexdigest()
+        suffix = Path(up.name).suffix
+
+        # Use a fixed cache directory under the system temp folder
+        cache_dir = Path(tempfile.gettempdir()) / f"sonify_uploads_{st.session_state.user_id}"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        tmp_path = cache_dir / f"{hash_hex}{suffix}"
+        # Only write if we haven’t already stored this exact upload
+        if not tmp_path.exists():
+            tmp_path.write_bytes(data)
+
+        st.session_state.audio_path = str(tmp_path)
         st.session_state.phase = "uploaded"
         st.rerun()
 
@@ -108,72 +121,54 @@ def handle_transcription():
     phase = st.session_state.phase
 
     if phase == "uploaded":
-        # use file_id for cache lookup
-        fid = st.session_state.file_id
-        cached_segs = load_cached_segments(fid, cfg["model"], cfg["language"])
-        if cached_segs:
-            st.session_state.segments = cached_segs
-            st.session_state.phase = "transcribed"
-            cached_turns = load_cached_turns(fid, cfg["model"], cfg["language"])
-            if cached_turns:
-                st.session_state.turns = cached_turns
-                st.session_state.phase = "diarized"
-            st.rerun()
         build_navigation()
 
     elif phase == "transcribing":
         build_navigation()
-        st.session_state.prog_bar = st.progress(0.0)
-        st.session_state.prog_text = st.empty()
-        prog_segs = st.expander("Transcript Segments so far", icon=":material/article:")
+        bar = st.progress(0.0)
+        txt = st.empty()
+        prog_segs = st.expander(
+            "Transcript Segments so far", icon=":material/article:"
+        )
         md_placeholder = prog_segs.empty()
-        segs = []
-        wav = cached_wav(st.session_state.audio_path)
-        pbar = st.session_state.prog_bar
-        ptxt = st.session_state.prog_text
-        t0 = time.time()
 
-        for u in transcribe_stream(
-                wav,
-                model_name=cfg["model"],
-                language=cfg["language"],
-                chunk_size=30,
-        ):
-            if st.session_state.phase != "transcribing":
-                st.warning("Stopped by user.")
-                return
+        def cb(completed: int, total: int):
+            """
+            Progress callback for cached transcription.
+            """
+            prog = completed / total if total else 0
+            bar.progress(prog)
+            txt.text(f"{completed}/{total} chunks | {prog:.0%}")
+        result = transcribe_with_cache(
+            st.session_state.audio_path,
+            model_name=cfg["model"],
+            language=cfg["language"],
+            chunk_size=30,
+            _progress_callback=cb,
+        )
 
-            idx, tot, prog = u["chunk_index"], u["total_chunks"], u["progress"]
-            elapsed = time.time() - t0
-            eta = (elapsed / prog - elapsed) if prog > 0 else 0.0
+        segments = result.get("segments", [])
+        md_lines = []
+        for seg in segments:
+            start = timedelta(seconds=int(seg["start"]))
+            end = timedelta(seconds=int(seg["end"]))
+            text = seg["text"].strip()
+            md_lines.append(
+                f"**[{start}–{end}]** {text}\n\n"
+            )
+        md_placeholder.markdown("".join(md_lines))
 
-            # update progress
-            pbar.progress(prog)
-            ptxt.text(f"{idx}/{tot} chunks  |  {int(prog * 100):3d}%  |  "
-                      f"Elapsed {format_hms(elapsed)}  |  ETA {format_hms(eta)}")
-            segs.extend(u["segments"])
-            md_lines = []
-            for s in segs:
-                start = timedelta(seconds=int(s["start"]))
-                end = timedelta(seconds=int(s["end"]))
-                text = s["text"].strip()
-                md_lines.append(f"**[{start}–{end}]** {text}\n\n")
-            md_blob = "".join(md_lines)
-
-            # 3) Overwrite the placeholder’s content
-            md_placeholder.markdown(md_blob)
-
-        st.session_state.segments = segs
-        save_cached_segments(st.session_state.file_id, cfg["model"], cfg["language"], segs)
-        st.session_state.phase = "transcribed"
-        pbar.empty()
-        ptxt.empty()
+        st.session_state.segments = segments
+        bar.empty()
+        txt.empty()
         prog_segs.empty()
+        st.session_state.phase = "transcribed"
         st.rerun()
 
     elif phase == "transcribed":
         build_navigation()
         show_transcript(st.session_state.segments)
+
 
 
 def build_navigation():
@@ -212,28 +207,25 @@ def handle_diarization():
         # placeholders for live updates
         bar = st.progress(0.0)
         txt = st.empty()
+        show_transcript(st.session_state.segments)
         fid = st.session_state.file_id
         mdl = cfg["model"]
         lang = cfg["language"]
-        turns = load_cached_turns(fid, mdl, lang)
-        if not turns:
-            # define our Streamlit callback
-            def progress_cb(step_name, completed, total):
-                pct = completed / total if total else 0.0
-                pct = max(0.0, min(pct, 1.0))  # clamp into [0,1]
-                bar.progress(pct)
-                txt.text(f"{step_name}: {completed}/{total} ({pct:.0%})")
 
-            # run with live updates
-            turns = diarize_audio(
-                st.session_state.audio_path,
-                st.session_state.segments,
-                cfg["hf_token"],
-                progress_callback=progress_cb
-            )
-            save_cached_turns(fid, mdl, lang, turns)
+        # define our Streamlit callback
+        def progress_cb(step_name, completed, total):
+            pct = completed / total if total else 0.0
+            pct = max(0.0, min(pct, 1.0))  # clamp into [0,1]
+            bar.progress(pct)
+            txt.text(f"{step_name}: {completed}/{total} ({pct:.0%})")
 
-            # finalize
+        # run with live updates
+        turns = diarize_audio(
+            st.session_state.audio_path,
+            st.session_state.segments,
+            cfg["hf_token"],
+            _progress_callback=progress_cb
+        )
         st.session_state.turns = turns
         st.session_state.phase = "diarized"
         st.rerun()
@@ -247,13 +239,13 @@ def handle_diarization():
         buffer_msg = None
         stt = None
         all_speakers = set([t["speaker"] for t in turns])
-        with st.expander("Assign Names to Speakers", icon=":material/account_circle:"):
+        with st.expander("Assign Names to Speakers", icon=":material/account_circle:", expanded=True):
             if st.session_state.speaker_names == {}:
                 st.session_state.speaker_names = {lbl: lbl for lbl in all_speakers}
             for lbl in all_speakers:
                 st.session_state.speaker_names[lbl] = st.text_input(f"Name for {lbl}", key=lbl, value=st.session_state.speaker_names.get(lbl))
 
-        with st.expander("Speaker Diarization", icon=":material/record_voice_over:"):
+        with st.expander("Speaker Diarization", icon=":material/record_voice_over:", expanded=True):
             speaker_txt = ""
             for t in turns:
                 # init
@@ -279,14 +271,16 @@ def handle_diarization():
                 json.dumps(turns, indent=2),
                 icon=":material/download:",
                 file_name=f"diarization_{st.session_state.file_id}.json",
-                key=f"dl_diar_json_{st.session_state.file_id}"
+                key=f"dl_diar_json_{st.session_state.file_id}",
+                type="secondary"
             )
             d2.download_button(
                 "adjusted .txt",
                 speaker_txt,
                 icon=":material/download:",
                 file_name=f"diarization_{st.session_state.file_id}.txt",
-                key=f"dl_diar_txt_{st.session_state.file_id}"
+                key=f"dl_diar_txt_{st.session_state.file_id}",
+                type="primary"
             )
             st.markdown(speaker_txt)
 

@@ -1,43 +1,16 @@
-import json
-import hashlib
-import logging
-from typing import List, Dict
+from typing import List, Dict, Callable
+import streamlit as st
 import torch
+import json
 from pyannote.audio.models.blocks.pooling import StatsPool
 from pyannote.audio.pipelines.utils.hook import ProgressHook
 from pyannote.audio import Pipeline
-from .transcribe import cached_wav  # ← import at the top of the file
-from sonify.utils.cache import generate_file_id
-from pathlib import Path
+from .transcribe import convert_to_wav  # ensure WAV conversion is available
 
 
-# … your existing imports …
-
-class StreamlitHook:
-    """
-    A Pyannote-compatible hook that calls `callback(step_name, completed, total)`
-    every time the pipeline emits an update.
-    """
-
-    def __init__(self, callback):
-        # callback will be called as callback(step_name, completed, total)
-        self.callback = callback
-
-    def __enter__(self):
-        # nothing to initialize
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        # nothing to clean up
-        return False
-
-    def __call__(self, step_name, step_artifact, file=None, total=None, completed=None):
-        # Pyannote guarantees total/completed on each call
-        # fire your callback immediately
-        self.callback(step_name, completed, total)
-
-
+# -----------------------------------------------------------------------------
 # Patch StatsPool for Pyannote
+# -----------------------------------------------------------------------------
 def patched_forward(self, sequences, weights=None):
     mean = sequences.mean(dim=-1)
     if sequences.size(-1) > 1:
@@ -49,86 +22,64 @@ def patched_forward(self, sequences, weights=None):
 
 StatsPool.forward = patched_forward
 
-# Cache directory
-DIAR_CACHE_DIR = Path.home() / ".cache" / "sonify" / "diar"
-DIAR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# -----------------------------------------------------------------------------
+# Streamlit-compatible progress hook
+# -----------------------------------------------------------------------------
+class StreamlitHook:
+    """
+    A Pyannote-compatible hook that calls `callback(step_name, completed, total)`
+    every time the pipeline emits an update.
+    """
+
+    def __init__(self, callback: Callable[[str, int, int], None]):
+        self.callback = callback
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+    def __call__(self, step_name, step_artifact=None, file=None, total=None, completed=None):
+        if total is not None and completed is not None:
+            self.callback(step_name, completed, total)
 
 
-def _diar_cache_key(file_id: str, segments: list) -> str:
-    m = hashlib.md5()
-    m.update(file_id.encode("utf-8"))
-    seg_json = json.dumps(
-        sorted(segments, key=lambda s: (s["start"], s["end"], s["text"])),
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    m.update(seg_json.encode("utf-8"))
-    return m.hexdigest()
+# -----------------------------------------------------------------------------
+# Resource-cached pipeline loader
+# -----------------------------------------------------------------------------
+@st.cache_resource(show_spinner=False)
+def get_diar_pipeline(model_id: str, hf_token: str) -> Pipeline:
+    """
+    Load and cache the Pyannote speaker-diarization pipeline as a resource.
+    """
+    return Pipeline.from_pretrained(model_id, use_auth_token=hf_token)
 
 
-def load_cached_diar(file_id: str, segments: list) -> List[Dict]:
-    key = _diar_cache_key(file_id, segments)
-    fpth = DIAR_CACHE_DIR / f"{key}.json"
-    if fpth.exists():
-        try:
-            return json.loads(fpth.read_text(encoding="utf-8"))
-        except:
-            fpth.unlink()
-    return []
-
-
-def save_cached_diar(file_id: str, segments: list, turns: list):
-    key = _diar_cache_key(file_id, segments)
-    fpth = DIAR_CACHE_DIR / f"{key}.json"
-    fpth.write_text(json.dumps(turns, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def diarize_audio(
-        src: str,
-        segments: list,
-        hf_token: str,
-        progress_callback: callable = None
+# -----------------------------------------------------------------------------
+# Data-cached diarization
+# -----------------------------------------------------------------------------
+@st.cache_data(show_spinner=False, hash_funcs={dict: lambda d: json.dumps(d, sort_keys=True, default=str), list: lambda lst: json.dumps(lst, sort_keys=True, default=str)})
+def run_diarization(
+        src_wav: str,
+        segments: List[Dict],
+        model_id: str,
+        hf_token: str
 ) -> List[Dict]:
     """
-    Run (or load) speaker diarization, align with segments, and cache results.
-
-    progress_callback: optional fn(str) to receive tqdm-style text.
+    Perform speaker diarization on WAV file and align with word segments.
+    Cached by Streamlit to avoid re-computation.
     """
+    print(f"{src_wav=}, {segments=}, {model_id=}, {hf_token=}")
+    pipeline = get_diar_pipeline(model_id, hf_token)
+    diar = pipeline(src_wav)
 
-    wav_path = cached_wav(src)
-    # 1) Prepare WAV & file_id
-    audio_bytes = Path(wav_path).read_bytes()
-    file_id = generate_file_id(audio_bytes, Path(wav_path).name)
-
-    # 2) Try cached diarization
-    cached = load_cached_diar(file_id, segments)
-    if cached:
-        logging.info("Loaded diarization from cache.")
-        return cached
-
-    # 3) Load pipeline
-    pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1",
-        use_auth_token=hf_token
-    )
-
-    # If a callback is provided, wrap it in our hook
-    if progress_callback:
-        hook = StreamlitHook(progress_callback)
-        with hook as h:
-            print("diarizing...")
-            diar = pipeline(wav_path, hook=h)
-    else:
-        # no callback — just run normally
-        with ProgressHook() as hook:
-            diar = pipeline(wav_path, hook=hook)
-    # 5) Extract raw turns
     raw_turns = [
         (speaker, turn.start, turn.end)
         for turn, _, speaker in diar.itertracks(yield_label=True)
     ]
 
-    # 6) Align word-segments
     aligned = []
     used = set()
     for speaker, start, end in raw_turns:
@@ -146,8 +97,42 @@ def diarize_audio(
                 "end": end,
                 "text": " ".join(texts),
             })
-
-    # 7) Cache & return
-    save_cached_diar(file_id, segments, aligned)
-    logging.info(f"Saved {len(aligned)} diarization turns to cache.")
     return aligned
+
+
+# -----------------------------------------------------------------------------
+# Public API
+# -----------------------------------------------------------------------------
+def diarize_audio(
+        src: str,
+        segments: List[Dict],
+        hf_token: str,
+        model_id: str = "pyannote/speaker-diarization-3.1",
+        _progress_callback: Callable[[str, int, int], None] = None
+) -> List[Dict]:
+    """
+    High-level speaker diarization wrapper using Streamlit caching.
+    If no Streamlit callback provided, uses Pyannote's CLI ProgressHook for stdout updates.
+    """
+    # Convert source to WAV if necessary
+    src_wav = convert_to_wav(src)
+
+    # CLI mode: no callback supplied, use Pyannote ProgressHook
+    if _progress_callback is None:
+        with ProgressHook() as hook:
+            pipeline = get_diar_pipeline(model_id, hf_token)
+            pipeline(src_wav, hook=hook)
+        # After CLI progress, return the cached full result4
+        #print(f"{src_wav=}, {segments=}, {model_id=}, {hf_token=}")
+        return run_diarization(src_wav, segments, model_id, hf_token)
+
+    # Streamlit mode: use StreamlitHook for progress
+    hook = StreamlitHook(_progress_callback)
+    with hook:
+        pipeline = get_diar_pipeline(model_id, hf_token)
+        pipeline(src_wav, hook=hook)
+
+    # Return cached full result after streaming
+
+    #print(f"{src_wav=}, {segments=}, {model_id=}, {hf_token=}")
+    return run_diarization(src_wav, segments, model_id, hf_token)

@@ -30,7 +30,7 @@ def main():
     parser.add_argument("-hft", "--hf_token", help="HuggingFace token for diarization")
     parser.add_argument("-O", "--out_dir", default="output", help="Output directory for transcript and diarization files")
     parser.add_argument("-f", "--force", action="store_true", help="Force refresh of outputs")
-    parser.add_argument("-c", "--chunk_size", type=int, help="Split audio into chunks of given length (seconds) for per-chunk caching")
+    parser.add_argument("-c", "--chunk_size", default=30, type=int, help="Split audio into chunks of given length (seconds) for per-chunk caching")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose debug logging for sonify modules and print segments")
     args = parser.parse_args()
 
@@ -86,8 +86,7 @@ def main():
 
     # Transcription
     result = transcribe_with_cache(
-        args.audio, args.model, args.lang,
-        force=args.force, chunk_size=args.chunk_size
+        args.audio, args.model, args.lang, chunk_size=args.chunk_size
     )
 
     # Write full transcript

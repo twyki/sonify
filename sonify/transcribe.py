@@ -1,240 +1,131 @@
 import hashlib
-import json
 import subprocess
-import logging
+import tempfile
 from pathlib import Path
 from tempfile import mkdtemp
 import math
 import shutil
-from typing import  Dict, Any, Generator, Callable
-
-# Cache directories
-CACHE_ROOT = Path.home() / ".cache" / "sonify"
-TXT_CACHE = CACHE_ROOT / "json"
-WAV_CACHE = CACHE_ROOT / "wav"
-CHUNK_CACHE = WAV_CACHE / "chunks"
-
-for folder in (TXT_CACHE, WAV_CACHE, CHUNK_CACHE):
-    folder.mkdir(parents=True, exist_ok=True)
-
-logger = logging.getLogger(__name__)
+from typing import Dict, Any, List, Callable
+import streamlit as st
+import json
 
 
 # -----------------------------------------------------------------------------
-# Hash helpers
+# Model loading and resource caching
 # -----------------------------------------------------------------------------
-
-def _sha256_file(path: str, block: int = 1 << 20) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(block), b""):
-            h.update(chunk)
-    return h.hexdigest()[:16]
-
-
-def _cache_key(src: str, model: str, lang: str) -> str:
-    h = hashlib.sha256()
-    h.update(Path(src).read_bytes())
-    h.update(model.encode())
-    h.update(lang.encode())
-    return h.hexdigest()[:16]
+@st.cache_resource
+def get_whisper_model(model_name: str):
+    import whisper
+    return whisper.load_model(model_name)
 
 
 # -----------------------------------------------------------------------------
-# WAV caching
+# WAV conversion and data caching
 # -----------------------------------------------------------------------------
-
-def cached_wav(input_path: str) -> str:
-    wav_hash = _sha256_file(input_path)
-    wav_path = WAV_CACHE / f"{wav_hash}.wav"
-    if wav_path.exists():
-        logger.debug(f"Found cached WAV: {wav_path}")
-        return str(wav_path)
+@st.cache_data(show_spinner=False, persist="disk")
+def convert_to_wav(input_path: str) -> str:
+    input_path = Path(input_path)
+    if input_path.suffix.lower() == ".wav":
+        return str(input_path)
+    temp_dir = Path(mkdtemp(prefix="wav_conv_"))
+    wav_path = temp_dir / (input_path.stem + ".wav")
     subprocess.run([
-        "ffmpeg", "-loglevel", "error", "-y", "-i", input_path,
+        "ffmpeg", "-loglevel", "error", "-y", "-i", str(input_path),
         "-ac", "1", "-ar", "16000", str(wav_path)
     ], check=True)
-    logger.debug(f"Converted and cached WAV: {wav_path}")
     return str(wav_path)
 
 
 # -----------------------------------------------------------------------------
-# Core transcription helpers
+# Core transcription helpers with caching
 # -----------------------------------------------------------------------------
-
-def _transcribe_simple(wav_path: str, model_name: str, language: str) -> Dict[str, Any]:
-    import whisper
-    model = whisper.load_model(model_name)
-    logger.info(f"Transcribing {wav_path} with {model_name} ({language}) …")
+@st.cache_data(show_spinner=False, hash_funcs={
+    dict: lambda d: json.dumps(d, sort_keys=True, default=str),
+    list: lambda lst: json.dumps(lst, sort_keys=True, default=str),
+}, persist="disk")
+def transcribe_simple(wav_path: str, model_name: str, language: str) -> Dict[str, Any]:
+    model = get_whisper_model(model_name)
     if language == "auto":
-        return model.transcribe(wav_path,verbose=False, fp16=False)
-    else:
-        return model.transcribe(wav_path, language=language, verbose=False ,fp16=False)
+        return model.transcribe(wav_path, verbose=False, fp16=False)
+    return model.transcribe(wav_path, language=language, verbose=False, fp16=False)
 
 
 # -----------------------------------------------------------------------------
-# Public API
+# Single-call transcription with callback (no generator)
 # -----------------------------------------------------------------------------
+def transcribe_stream(
+    wav_path: str,
+    model_name: str,
+    language: str,
+    chunk_size: int,
+    _progress_callback: Callable[[int, int], None] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Transcribe audio in fixed-size chunks, calling `_progress_callback(completed, total)`
+    after each chunk, and return the combined segments list. Chunk files are stored
+    deterministically under a temp cache directory to avoid recreating them each run.
+    """
+    # Base cache directory for chunk files
+    base = Path(tempfile.gettempdir()) / "sonify_chunks"
+    key = hashlib.sha256(f"{wav_path}|{chunk_size}".encode()).hexdigest()
+    cache_dir = base / key
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
+    # Only split into chunks if we haven't already
+    chunk_files = sorted(cache_dir.glob("chunk_*.wav"))
+    if not chunk_files:
+        # Determine total number of chunks
+        dur = float(
+            subprocess.check_output([
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", wav_path
+            ]).decode().strip()
+        )
+        # Run ffmpeg segmenter
+        subprocess.run([
+            "ffmpeg", "-loglevel", "error", "-y", "-i", wav_path,
+            "-f", "segment", "-segment_time", str(chunk_size),
+            "-c", "copy", str(cache_dir / "chunk_%03d.wav")
+        ], check=True)
+        chunk_files = sorted(cache_dir.glob("chunk_*.wav"))
+
+    total_chunks = len(chunk_files)
+    segments: List[Dict[str, Any]] = []
+
+    for idx, chunk_file in enumerate(chunk_files, start=1):
+        # Transcribe each chunk via your cached helper
+        res = transcribe_simple(str(chunk_file), model_name, language)
+
+        # Adjust timestamps and collect segments
+        for seg in res.get("segments", []):
+            seg["start"] += (idx - 1) * chunk_size
+            seg["end"] += (idx - 1) * chunk_size
+            segments.append(seg)
+
+        # Report progress if requested
+        if _progress_callback:
+            _progress_callback(idx, total_chunks)
+
+    return segments
+
+
+# -----------------------------------------------------------------------------
+# Full-file transcription via cache (calls transcribe_stream)
+# -----------------------------------------------------------------------------
 def transcribe_with_cache(
         src: str,
         model_name: str = "medium",
         language: str = "de",
-        force: bool = False,
         chunk_size: int | None = None,
-        progress_callback: Callable[[float], None] = None,
+        _progress_callback: Callable[[int, int], None] = None,
 ) -> Dict[str, Any]:
-    """
-    Full-file transcription, cached.
-
-    `chunk_size` is retained for backward compatibility – when provided, the
-    function will split the WAV and stitch results. Internally it re-uses this
-    very same function, so caching still applies per chunk + model + language.
-    Calls progress_callback(progress) with float in [0,1] if provided.
-    """
-    key = _cache_key(src, model_name, language) if chunk_size is None else None
-    cache_file = TXT_CACHE / f"{key}.json" if key else None
-
-    # Load from cache if available, including segments
-    if cache_file and cache_file.exists() and not force:
-        result = json.loads(cache_file.read_text("utf-8"))
-        if "segments" in result and progress_callback:
-            progress_callback(1.0)
-        return result
-
-    if cache_file and cache_file.exists():
-        cache_file.unlink()
-
-    wav_path = cached_wav(src)
-
-    # Recursive chunking path
-    if chunk_size:
-        dur = float(
-            subprocess.check_output([
-                "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1", wav_path
-            ]).decode().strip()
-        )
-        total_chunks = math.ceil(dur / chunk_size)
-        temp_dir = Path(mkdtemp(prefix="chunks_"))
-        subprocess.run([
-            "ffmpeg", "-loglevel", "error", "-y", "-i", wav_path,
-            "-f", "segment", "-segment_time", str(chunk_size),
-            "-c", "copy", str(temp_dir / "chunk_%03d.wav")
-        ], check=True)
-
-        segments, texts = [], []
-        for idx, f in enumerate(sorted(temp_dir.glob("chunk_*.wav"))):
-            if progress_callback:
-                progress_callback(idx / total_chunks)
-            res = transcribe_with_cache(
-                str(f), model_name, language, force, None, progress_callback
-            )
-            off = idx * chunk_size
-            for s in res.get("segments", []):
-                s["start"] += off
-                s["end"] += off
-                segments.append(s)
-            texts.append(res.get("text", ""))
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        result = {"text": " ".join(texts), "segments": segments}
-    else:
-        result = _transcribe_simple(wav_path, model_name, language)
-
-    # Final caching
-    if cache_file:
-        cache_file.write_text(
-            json.dumps(result, ensure_ascii=False, indent=2), "utf-8"
-        )
-        if progress_callback:
-            progress_callback(1.0)
-    return result
-
-
-def transcribe_stream(
-        wav_path: str,
-        model_name: str,
-        language: str,
-        chunk_size: int = 30,
-) -> Generator[Dict[str, Any], None, None]:
-    import subprocess, math, shutil, json, hashlib
-    from pathlib import Path
-    from tempfile import mkdtemp
-
-    # -------------------------------------------------------------------------
-    # Helpers: per‐chunk cache key + path
-    # -------------------------------------------------------------------------
-    def _chunk_cache_key(chunk_path: str, model: str, lang: str) -> str:
-        h = hashlib.sha256()
-        h.update(Path(chunk_path).read_bytes())
-        h.update(model.encode())
-        h.update(lang.encode())
-        return h.hexdigest()[:16]
-
-    CHUNK_JSON_CACHE = Path.home() / ".cache" / "sonify" / "json" / "chunks"
-    CHUNK_JSON_CACHE.mkdir(parents=True, exist_ok=True)
-
-    # -------------------------------------------------------------------------
-    # 1. figure total duration & number of chunks
-    # -------------------------------------------------------------------------
-    dur = float(
-        subprocess.check_output([
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", wav_path
-        ]).decode().strip()
-    )
-    total_chunks = math.ceil(dur / chunk_size)
-
-    # -------------------------------------------------------------------------
-    # 2. split into fixed-length chunks
-    # -------------------------------------------------------------------------
-    temp_dir = Path(mkdtemp(prefix="stream_chunks_"))
-    subprocess.run([
-        "ffmpeg", "-loglevel", "error", "-y", "-i", wav_path,
-        "-f", "segment", "-segment_time", str(chunk_size),
-        "-c", "copy", str(temp_dir / "chunk_%03d.wav")
-    ], check=True)
-
-    # -------------------------------------------------------------------------
-    # 3. transcribe each chunk, loading/saving per-chunk cache
-    # -------------------------------------------------------------------------
-    all_segs = []
-    chunks = sorted(temp_dir.glob("chunk_*.wav"))
-    for idx, chunk in enumerate(chunks):
-        key = _chunk_cache_key(str(chunk), model_name, language)
-        cache_f = CHUNK_JSON_CACHE / f"{key}.json"
-
-        if cache_f.exists():
-            # load cached result
-            res = json.loads(cache_f.read_text("utf-8"))
-        else:
-            # run Whisper on this chunk
-            res = _transcribe_simple(str(chunk), model_name, language)
-            # save to cache
-            cache_f.write_text(json.dumps(res, ensure_ascii=False, indent=2), "utf-8")
-
-        # shift timestamps into global timeline
-        offset = idx * chunk_size
-        for s in res.get("segments", []):
-            s["start"] += offset
-            s["end"] += offset
-            all_segs.append(s)
-
-        # yield this chunk’s progress and segments
-        yield {
-            "chunk_index": idx + 1,
-            "total_chunks": total_chunks,
-            "progress": (idx + 1) / total_chunks,
-            "segments": res.get("segments", []),
-        }
-
-    # -------------------------------------------------------------------------
-    # 4. cleanup & final 100% bump
-    # -------------------------------------------------------------------------
-    shutil.rmtree(temp_dir, ignore_errors=True)
-    yield {
-        "chunk_index": total_chunks,
-        "total_chunks": total_chunks,
-        "progress": 1.0,
-        "segments": [],
-    }
+    wav = convert_to_wav(src)
+    if chunk_size is None:
+        result = transcribe_simple(wav, model_name, language)
+        if _progress_callback:
+            _progress_callback(1, 1)
+        return {"text": result.get("text", ""), "segments": result.get("segments", [])}
+    segments = transcribe_stream(wav, model_name, language, chunk_size, _progress_callback)
+    text = " ".join(seg.get("text", "") for seg in segments)
+    return {"text": text, "segments": segments}

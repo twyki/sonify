@@ -1,13 +1,16 @@
 import streamlit as st
-
+import  uuid
 
 def init_session():
-    """Initialize session state and decrypt stored HF token if present."""
+    # Unique ID per user session
+    if 'session_id' not in st.session_state:
+        st.session_state.session_id = uuid.uuid4().hex
+
 
     st.session_state.setdefault("cfg", {
-        "model": "medium",
-        "language": "de",
-        "hf_token": st.secrets["hf_token"]
+        "model": "small",
+        "language": "auto",
+        "hf_token": f"{st.secrets.hf_token}"
     })
     # Workflow state
     st.session_state.setdefault("phase", "start")
