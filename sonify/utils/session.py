@@ -11,7 +11,7 @@ def init_session():
     if 'cfg' not in st.session_state:
         st.session_state.cfg = {
             'model': 'base',
-            'language': 'en',
+            'language': 'auto',
             'hf_token': f"{st.secrets.hf_token}",
         }
     # Batch processing state

@@ -22,7 +22,6 @@ def get_whisper_model(model_name: str):
 # -----------------------------------------------------------------------------
 # WAV conversion and data caching
 # -----------------------------------------------------------------------------
-@st.cache_data(show_spinner=False, persist="disk")
 def convert_to_wav(input_path: str) -> str:
     input_path = Path(input_path)
     if input_path.suffix.lower() == ".wav":
@@ -39,10 +38,6 @@ def convert_to_wav(input_path: str) -> str:
 # -----------------------------------------------------------------------------
 # Core transcription helpers with caching
 # -----------------------------------------------------------------------------
-@st.cache_data(show_spinner=False, hash_funcs={
-    dict: lambda d: json.dumps(d, sort_keys=True, default=str),
-    list: lambda lst: json.dumps(lst, sort_keys=True, default=str),
-}, persist="disk")
 def transcribe_simple(wav_path: str, model_name: str, language: str) -> Dict[str, Any]:
     model = get_whisper_model(model_name)
     if language == "auto":

@@ -60,7 +60,6 @@ def get_diar_pipeline(model_id: str, hf_token: str) -> Pipeline:
 # -----------------------------------------------------------------------------
 # Data-cached diarization
 # -----------------------------------------------------------------------------
-@st.cache_data(show_spinner=False, hash_funcs={dict: lambda d: json.dumps(d, sort_keys=True, default=str), list: lambda lst: json.dumps(lst, sort_keys=True, default=str)})
 def run_diarization(
         src_wav: str,
         segments: List[Dict],

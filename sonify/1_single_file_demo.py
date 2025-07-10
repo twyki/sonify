@@ -13,6 +13,10 @@ try:
 except AttributeError:
     init_session()  # your function that does st.session_state.cfg = {...}
     cfg = st.session_state.cfg
+
+if 'error_count' not in st.session_state:
+    st.session_state.error_count = 0
+
 st.set_page_config(page_title="Sonify - Single Demo", page_icon=":material/speaker:", layout="wide")
 AUDIO_TYPES = ["mp3", "wav", "m4a", "flac", "aac", "opus", "ogg"]
 
@@ -297,6 +301,12 @@ try:
 except Exception as e:
     st.error(f"An unexpected error occurred while processing your files: {e}\n"
              f"if this occurs multiple times, please contact us")
+    st.session_state.error_count += 1
+
+    # If too many errors, stop the app
+    if st.session_state.error_count >= 5:
+        st.error("Application encountered too many errors and will stop. Please refresh your browser to restart.")
+        st.stop()
     if st.button("Restart Workflow", key='error_restart'):
         # Clear all non-ID state and rerun
         for key in list(st.session_state.keys()):

@@ -4,20 +4,54 @@ import tempfile
 import hashlib
 from datetime import timedelta
 
-from sonify.utils.session import init_session
+from sonify.utils.session import init_session, reset_state
 from sonify.transcribe import transcribe_with_cache
 from sonify.diarize import diarize_audio
 
 # Constants
 AUDIO_TYPES = ["mp3", "wav", "m4a", "flac", "aac", "opus", "ogg"]
-MAX_BATCH_FILES = 20  # reasonable limit
+MAX_BATCH_FILES = 5  # reasonable limit
+if 'error_count' not in st.session_state:
+    st.session_state.error_count = 0
 
 st.set_page_config(page_title="Sonify - Batch Demo", page_icon=":material/speaker:", layout="wide")
+
 
 def format_hms(seconds: float) -> str:
     hrs, rem = divmod(int(seconds), 3600)
     mins, secs = divmod(rem, 60)
     return f"{hrs:02d}:{mins:02d}:{secs:02d}"
+
+
+def download_all_as_zip(file_paths: list[str], zip_name: str = "batch_results.zip") -> None:
+    """
+    Bundle a list of file paths into an in-memory ZIP and render a Streamlit download button.
+
+    Args:
+        file_paths: List of file-system paths to include in the ZIP.
+        zip_name: Name of the generated ZIP file.
+    """
+    import io
+    import zipfile
+    from pathlib import Path
+
+    # Create an in-memory ZIP archive
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path_str in file_paths:
+            path = Path(path_str)
+            if path.is_file():
+                archive.write(path, arcname=path.name)
+
+    # Reset buffer position and render download button
+    zip_buffer.seek(0)
+    st.download_button(
+        label="All Results as ZIP File",
+        data=zip_buffer,
+        file_name=zip_name,
+        mime="application/zip",
+        icon=":material/download:",
+    )
 
 
 def main():
@@ -65,21 +99,29 @@ def main():
 
     # Processing phase
     if st.session_state.batch_phase == 'processing':
-        files = st.session_state.get('batch_files', []) or []
-        # Spinner to indicate processing
+        files = st.session_state.get("batch_files", []) or []
+        processed_count = 0
+
         with st.spinner("Processing files... Please wait."):
-            for up in files:
-                st.header(up.name)
+            total_files = len(files)
+            progress_bar = st.progress(0)
+
+            for index, up in enumerate(files, start=1):
+                processed_count += 1
+                progress_bar.progress(index / total_files)
+
                 data = up.read()
                 content_hash = hashlib.sha256(data).hexdigest()
                 suffix = Path(up.name).suffix
-                cache_dir = Path(tempfile.gettempdir()) / f"batch_{st.session_state.session_id}"
+                cache_dir = (
+                        Path(tempfile.gettempdir())
+                        / f"batch_{st.session_state.session_id}"
+                )
                 cache_dir.mkdir(parents=True, exist_ok=True)
                 path = cache_dir / f"{content_hash}{suffix}"
+
                 if not path.exists():
                     path.write_bytes(data)
-
-                st.audio(data, format=f"audio/{suffix[1:]}")
 
                 # Transcribe & Diarize
                 res = transcribe_with_cache(
@@ -141,14 +183,18 @@ def main():
                     st.markdown(speaker_txt)
 
 
+
 try:
     main()
 except Exception as e:
+    st.session_state.error_count += 1
+
+    # If too many errors, stop the app
+    if st.session_state.error_count >= 5:
+        st.error("Application encountered too many errors and will stop. Please refresh your browser to restart.")
+        st.stop()
     st.error(f"An unexpected error occurred while processing your files: {e}\n"
              f"if this occurs multiple times, please contact us")
     if st.button("Restart Workflow", key='error_restart'):
-        # Clear all non-ID state and rerun
-        for key in list(st.session_state.keys()):
-            if key not in ('session_id', 'user_id', 'cfg'):
-                del st.session_state[key]
+        reset_state()
     st.rerun()
