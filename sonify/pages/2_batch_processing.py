@@ -1,8 +1,12 @@
+import json
+
 import streamlit as st
 from pathlib import Path
 import tempfile
 import hashlib
 from datetime import timedelta
+import io
+import zipfile
 
 from sonify.utils.session import init_session, reset_state
 from sonify.transcribe import transcribe_with_cache
@@ -10,7 +14,7 @@ from sonify.diarize import diarize_audio
 
 # Constants
 AUDIO_TYPES = ["mp3", "wav", "m4a", "flac", "aac", "opus", "ogg"]
-MAX_BATCH_FILES = 5  # reasonable limit
+MAX_BATCH_FILES = 20  # reasonable limit
 if 'error_count' not in st.session_state:
     st.session_state.error_count = 0
 
@@ -23,35 +27,41 @@ def format_hms(seconds: float) -> str:
     return f"{hrs:02d}:{mins:02d}:{secs:02d}"
 
 
-def download_all_as_zip(file_paths: list[str], zip_name: str = "batch_results.zip") -> None:
-    """
-    Bundle a list of file paths into an in-memory ZIP and render a Streamlit download button.
-
-    Args:
-        file_paths: List of file-system paths to include in the ZIP.
-        zip_name: Name of the generated ZIP file.
-    """
-    import io
-    import zipfile
-    from pathlib import Path
-
-    # Create an in-memory ZIP archive
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for path_str in file_paths:
-            path = Path(path_str)
-            if path.is_file():
-                archive.write(path, arcname=path.name)
-
-    # Reset buffer position and render download button
-    zip_buffer.seek(0)
-    st.download_button(
-        label="All Results as ZIP File",
-        data=zip_buffer,
-        file_name=zip_name,
-        mime="application/zip",
-        icon=":material/download:",
-    )
+def process_turns(turns):
+    if not turns:
+        return ""
+    speakers = {t['speaker'] for t in turns}
+    # single-speaker fast path
+    if len(speakers) == 1:
+        spk = turns[0]['speaker']
+        start = timedelta(seconds=int(turns[0]['start']))
+        end = timedelta(seconds=int(turns[-1]['end']))
+        text = " ".join(t['text'].strip() for t in turns)
+        return f"{spk} [{start}–{end}]: {text}\n\n"
+    # Build adjusted transcript using merged segments logic
+    prev_start_time = None
+    prev_speaker = None
+    buffer_msg = ""
+    speaker_txt = ""
+    for t in turns:
+        # init
+        if prev_start_time is None and prev_speaker is None:
+            stt = timedelta(seconds=int(t["start"]))
+            prev_speaker = t["speaker"]
+            buffer_msg = t['text']
+        if prev_speaker == t["speaker"]:
+            buffer_msg += f" {t['text']}"
+        else:
+            prev_start_time = t["start"]
+            ent = timedelta(seconds=int(t["start"]))
+            speaker_txt += f"**{prev_speaker}** [{stt}–{ent}]: {buffer_msg}\n\n"
+            stt = timedelta(seconds=int(t["start"]))
+            prev_speaker = t["speaker"]
+            buffer_msg = t['text']
+    if len(turns) > 0:
+        ent = timedelta(seconds=int(turns[-1]["start"]))
+        speaker_txt += f"**{prev_speaker}** [{stt}–{ent}]: {buffer_msg}\n\n"
+    return speaker_txt
 
 
 def main():
@@ -101,7 +111,7 @@ def main():
     if st.session_state.batch_phase == 'processing':
         files = st.session_state.get("batch_files", []) or []
         processed_count = 0
-
+        all_transcripts: dict[str, str] = {}
         with st.spinner("Processing files... Please wait."):
             total_files = len(files)
             progress_bar = st.progress(0)
@@ -127,7 +137,8 @@ def main():
                 res = transcribe_with_cache(
                     str(path),
                     model_name=st.session_state.cfg['model'],
-                    language=st.session_state.cfg['language']
+                    language=st.session_state.cfg['language'],
+                    chunk_size=30,
                 )
                 segments = res.get('segments', [])
                 turns = diarize_audio(
@@ -140,40 +151,8 @@ def main():
                         icon=":material/record_voice_over:",
                         expanded=False
                 ):
-                    # Build adjusted transcript using merged segments logic
-                    prev_start_time = None
-                    prev_speaker = None
-                    buffer_msg = ""
-                    speaker_txt = ""
 
-                    # Ensure speaker_names dict exists
-                    if 'speaker_names' not in st.session_state:
-                        st.session_state.speaker_names = {}
-
-                    for t in turns:
-                        # Initialize for first turn
-                        if prev_start_time is None and prev_speaker is None:
-                            stt = timedelta(seconds=int(t["start"]))
-                            prev_speaker = st.session_state.speaker_names.get(t["speaker"], t["speaker"])
-                            buffer_msg = t['text']
-
-                        current_speaker = st.session_state.speaker_names.get(t["speaker"], t["speaker"])
-                        # Same speaker: accumulate text
-                        if current_speaker == prev_speaker:
-                            buffer_msg += f" {t['text']}"
-                        else:
-                            ent = timedelta(seconds=int(t["start"]))
-                            speaker_txt += f"**{prev_speaker}** [{stt}–{ent}]: {buffer_msg}\n\n"
-                            # Reset for new speaker
-                            stt = timedelta(seconds=int(t["start"]))
-                            prev_speaker = current_speaker
-                            buffer_msg = t['text']
-
-                    # Flush last buffer
-                    if turns:
-                        ent = timedelta(seconds=int(turns[-1]["start"]))
-                        speaker_txt += f"**{prev_speaker}** [{stt}–{ent}]: {buffer_msg}\n\n"
-
+                    speaker_txt = process_turns(turns)
                     st.download_button(
                         f"Download .txt", speaker_txt,
                         file_name=f"{up.name}_transcript.txt",
@@ -181,7 +160,17 @@ def main():
                         type="primary"
                     )
                     st.markdown(speaker_txt)
+                    all_transcripts[up.name] = speaker_txt
+                    print(all_transcripts)
 
+        dump = json.dumps(all_transcripts, indent=4)
+        print(dump)
+        # Download button
+        st.download_button(
+            "Download all transcripts", dump,
+            file_name=f"all_transcripts.txt", icon=":material/download:",
+            type="primary"
+        )
 
 
 try:
