@@ -5,8 +5,6 @@ from pathlib import Path
 import tempfile
 import hashlib
 from datetime import timedelta
-import io
-import zipfile
 
 from sonify.utils.session import init_session, reset_state
 from sonify.transcribe import transcribe_with_cache
@@ -120,6 +118,7 @@ def main():
                 processed_count += 1
                 progress_bar.progress(index / total_files)
 
+                up.seek(0)
                 data = up.read()
                 content_hash = hashlib.sha256(data).hexdigest()
                 suffix = Path(up.name).suffix
@@ -153,22 +152,17 @@ def main():
                 ):
 
                     speaker_txt = process_turns(turns)
-                    st.download_button(
-                        f"Download .txt", speaker_txt,
-                        file_name=f"{up.name}_transcript.txt",
-                        icon=":material/download:",
-                        type="primary"
-                    )
                     st.markdown(speaker_txt)
                     all_transcripts[up.name] = speaker_txt
-                    print(all_transcripts)
 
-        dump = json.dumps(all_transcripts, indent=4)
-        print(dump)
         # Download button
-        st.download_button(
-            "Download all transcripts", dump,
-            file_name=f"all_transcripts.txt", icon=":material/download:",
+        _, _, d1 = st.columns([1, 6, 1])
+        d1.download_button(
+            "all  transcripts .json",
+            json.dumps(all_transcripts, indent=2),
+            icon=":material/download:",
+            file_name=f"all_transcirpts.text",
+            key=f"all_transcripts_{st.session_state.batch_key}",
             type="primary"
         )
 
